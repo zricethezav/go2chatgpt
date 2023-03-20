@@ -22,7 +22,7 @@ Usage: go2chatgpt [options] <source> <output_folder>
 ```
 
 ## Examples
-See `/example`
+See `/examples`
 
 ## Notes:
 - ignores non-text files (binaries, jpgs, etc)
