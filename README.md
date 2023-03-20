@@ -1,5 +1,7 @@
 # go2chatgpt
-A small program that chunks up program files to be loaded into chatgpt. 1/2 written by chatgpt. Inspired by https://github.com/mpoon/gpt-repository-loader
+A small program that chunks up program files to be loaded into chatgpt. 1/2 written by chatgpt. Inspired by https://github.com/mpoon/gpt-repository-loader. Note that this has limitations as chatgpt doesn't seem to remember past 32KB-ish of data. This is probably documented somewhere but I haven't looked it up.
+
+Ideally you could load up all the `chunk{num}.txt`s and query chatgpt questions in plain english as a tool to learn a new codebase.
 
 ## Install
 ```
