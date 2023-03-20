@@ -24,4 +24,7 @@ Usage: go2chatgpt [options] <source> <output_folder>
 ## Examples
 See `/example`
 
+## Notes:
+- ignores non-text files
+- ignores `{report-path}/chunk{num}.txt` files
 
