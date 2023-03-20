@@ -1,0 +1,576 @@
+
+----CONTINUED FILE: cmd/root.go----
+		log.Fatal().Msg(err.Error())
+	}
+}
+
+----END FILE: cmd/root.go----
+
+----BEGIN FILE: cmd/version.go----
+package cmd
+
+import (
+	"fmt"
+
+	"github.com/spf13/cobra"
+)
+
+var Version = "version is set by build process"
+
+func init() {
+	rootCmd.AddCommand(versionCmd)
+}
+
+var versionCmd = &cobra.Command{
+	Use:   "version",
+	Short: "display gitleaks version",
+	Run:   runVersion,
+}
+
+func runVersion(cmd *cobra.Command, args []string) {
+	fmt.Println(Version)
+}
+
+----END FILE: cmd/version.go----
+
+----BEGIN FILE: config/allowlist.go----
+package config
+
+import (
+	"regexp"
+	"strings"
+)
+
+// Allowlist allows a rule to be ignored for specific
+// regexes, paths, and/or commits
+type Allowlist struct {
+	// Short human readable description of the allowlist.
+	Description string
+
+	// Regexes is slice of content regular expressions that are allowed to be ignored.
+	Regexes []*regexp.Regexp
+
+	// RegexTarget
+	RegexTarget string
+
+	// Paths is a slice of path regular expressions that are allowed to be ignored.
+	Paths []*regexp.Regexp
+
+	// Commits is a slice of commit SHAs that are allowed to be ignored.
+	Commits []string
+
+	// StopWords is a slice of stop words that are allowed to be ignored.
+	// This targets the _secret_, not the content of the regex match like the
+	// Regexes slice.
+	StopWords []string
+}
+
+// CommitAllowed returns true if the commit is allowed to be ignored.
+func (a *Allowlist) CommitAllowed(c string) bool {
+	if c == "" {
+		return false
+	}
+	for _, commit := range a.Commits {
+		if commit == c {
+			return true
+		}
+	}
+	return false
+}
+
+// PathAllowed returns true if the path is allowed to be ignored.
+func (a *Allowlist) PathAllowed(path string) bool {
+	return anyRegexMatch(path, a.Paths)
+}
+
+// RegexAllowed returns true if the regex is allowed to be ignored.
+func (a *Allowlist) RegexAllowed(s string) bool {
+	return anyRegexMatch(s, a.Regexes)
+}
+
+func (a *Allowlist) ContainsStopWord(s string) bool {
+	s = strings.ToLower(s)
+	for _, stopWord := range a.StopWords {
+		if strings.Contains(s, strings.ToLower(stopWord)) {
+			return true
+		}
+	}
+	return false
+}
+
+----END FILE: config/allowlist.go----
+
+----BEGIN FILE: config/config.go----
+package config
+
+import (
+	_ "embed"
+	"fmt"
+	"regexp"
+	"strings"
+
+	"github.com/rs/zerolog/log"
+	"github.com/spf13/viper"
+)
+
+//go:embed gitleaks.toml
+var DefaultConfig string
+
+// use to keep track of how many configs we can extend
+// yea I know, globals bad
+var extendDepth int
+
+const maxExtendDepth = 2
+
+// ViperConfig is the config struct used by the Viper config package
+// to parse the config file. This struct does not include regular expressions.
+// It is used as an intermediary to convert the Viper config to the Config struct.
+type ViperConfig struct {
+	Description string
+	Extend      Extend
+	Rules       []struct {
+		ID          string
+		Description string
+		Entropy     float64
+		SecretGroup int
+		Regex       string
+		Keywords    []string
+		Path        string
+		Tags        []string
+
+		Allowlist struct {
+			RegexTarget string
+			Regexes     []string
+			Paths       []string
+			Commits     []string
+			StopWords   []string
+		}
+	}
+	Allowlist struct {
+		RegexTarget string
+		Regexes     []string
+		Paths       []string
+		Commits     []string
+		StopWords   []string
+	}
+}
+
+// Config is a configuration struct that contains rules and an allowlist if present.
+type Config struct {
+	Extend      Extend
+	Path        string
+	Description string
+	Rules       map[string]Rule
+	Allowlist   Allowlist
+	Keywords    []string
+
+	// used to keep sarif results consistent
+	orderedRules []string
+}
+
+// Extend is a struct that allows users to define how they want their
+// configuration extended by other configuration files.
+type Extend struct {
+	Path       string
+	URL        string
+	UseDefault bool
+}
+
+func (vc *ViperConfig) Translate() (Config, error) {
+	var (
+		keywords     []string
+		orderedRules []string
+	)
+	rulesMap := make(map[string]Rule)
+
+	for _, r := range vc.Rules {
+		var allowlistRegexes []*regexp.Regexp
+		for _, a := range r.Allowlist.Regexes {
+			allowlistRegexes = append(allowlistRegexes, regexp.MustCompile(a))
+		}
+		var allowlistPaths []*regexp.Regexp
+		for _, a := range r.Allowlist.Paths {
+			allowlistPaths = append(allowlistPaths, regexp.MustCompile(a))
+		}
+
+		if r.Keywords == nil {
+			r.Keywords = []string{}
+		} else {
+			for _, k := range r.Keywords {
+				keywords = append(keywords, strings.ToLower(k))
+			}
+		}
+
+		if r.Tags == nil {
+			r.Tags = []string{}
+		}
+
+		var configRegex *regexp.Regexp
+		var configPathRegex *regexp.Regexp
+		if r.Regex == "" {
+			configRegex = nil
+		} else {
+			configRegex = regexp.MustCompile(r.Regex)
+		}
+		if r.Path == "" {
+			configPathRegex = nil
+		} else {
+			configPathRegex = regexp.MustCompile(r.Path)
+		}
+		r := Rule{
+			Description: r.Description,
+			RuleID:      r.ID,
+			Regex:       configRegex,
+			Path:        configPathRegex,
+			SecretGroup: r.SecretGroup,
+			Entropy:     r.Entropy,
+			Tags:        r.Tags,
+			Keywords:    r.Keywords,
+			Allowlist: Allowlist{
+				RegexTarget: r.Allowlist.RegexTarget,
+				Regexes:     allowlistRegexes,
+				Paths:       allowlistPaths,
+				Commits:     r.Allowlist.Commits,
+				StopWords:   r.Allowlist.StopWords,
+			},
+		}
+		orderedRules = append(orderedRules, r.RuleID)
+
+		if r.Regex != nil && r.SecretGroup > r.Regex.NumSubexp() {
+			return Config{}, fmt.Errorf("%s invalid regex secret group %d, max regex secret group %d", r.Description, r.SecretGroup, r.Regex.NumSubexp())
+		}
+		rulesMap[r.RuleID] = r
+	}
+	var allowlistRegexes []*regexp.Regexp
+	for _, a := range vc.Allowlist.Regexes {
+		allowlistRegexes = append(allowlistRegexes, regexp.MustCompile(a))
+	}
+	var allowlistPaths []*regexp.Regexp
+	for _, a := range vc.Allowlist.Paths {
+		allowlistPaths = append(allowlistPaths, regexp.MustCompile(a))
+	}
+	c := Config{
+		Description: vc.Description,
+		Extend:      vc.Extend,
+		Rules:       rulesMap,
+		Allowlist: Allowlist{
+			RegexTarget: vc.Allowlist.RegexTarget,
+			Regexes:     allowlistRegexes,
+			Paths:       allowlistPaths,
+			Commits:     vc.Allowlist.Commits,
+			StopWords:   vc.Allowlist.StopWords,
+		},
+		Keywords:     keywords,
+		orderedRules: orderedRules,
+	}
+
+	if maxExtendDepth != extendDepth {
+		// disallow both usedefault and path from being set
+		if c.Extend.Path != "" && c.Extend.UseDefault {
+			log.Fatal().Msg("unable to load config due to extend.path and extend.useDefault being set")
+		}
+		if c.Extend.UseDefault {
+			c.extendDefault()
+		} else if c.Extend.Path != "" {
+			c.extendPath()
+		}
+
+	}
+
+	return c, nil
+}
+
+func (c *Config) OrderedRules() []Rule {
+	var orderedRules []Rule
+	for _, id := range c.orderedRules {
+		if _, ok := c.Rules[id]; ok {
+			orderedRules = append(orderedRules, c.Rules[id])
+		}
+	}
+	return orderedRules
+}
+
+func (c *Config) extendDefault() {
+	extendDepth++
+	viper.SetConfigType("toml")
+	if err := viper.ReadConfig(strings.NewReader(DefaultConfig)); err != nil {
+		log.Fatal().Msgf("failed to load extended config, err: %s", err)
+		return
+	}
+	defaultViperConfig := ViperConfig{}
+	if err := viper.Unmarshal(&defaultViperConfig); err != nil {
+		log.Fatal().Msgf("failed to load extended config, err: %s", err)
+		return
+	}
+	cfg, err := defaultViperConfig.Translate()
+	if err != nil {
+		log.Fatal().Msgf("failed to load extended config, err: %s", err)
+		return
+	}
+	log.Debug().Msg("extending config with default config")
+	c.extend(cfg)
+
+}
+
+func (c *Config) extendPath() {
+	extendDepth++
+	viper.SetConfigFile(c.Extend.Path)
+	if err := viper.ReadInConfig(); err != nil {
+		log.Fatal().Msgf("failed to load extended config, err: %s", err)
+		return
+	}
+	extensionViperConfig := ViperConfig{}
+	if err := viper.Unmarshal(&extensionViperConfig); err != nil {
+		log.Fatal().Msgf("failed to load extended config, err: %s", err)
+		return
+	}
+	cfg, err := extensionViperConfig.Translate()
+	if err != nil {
+		log.Fatal().Msgf("failed to load extended config, err: %s", err)
+		return
+	}
+	log.Debug().Msgf("extending config with %s", c.Extend.Path)
+	c.extend(cfg)
+}
+
+func (c *Config) extendURL() {
+	// TODO
+}
+
+func (c *Config) extend(extensionConfig Config) {
+	for ruleID, rule := range extensionConfig.Rules {
+		if _, ok := c.Rules[ruleID]; !ok {
+			log.Trace().Msgf("adding %s to base config", ruleID)
+			c.Rules[ruleID] = rule
+			c.Keywords = append(c.Keywords, rule.Keywords...)
+		}
+	}
+
+	// append allowlists, not attempting to merge
+	c.Allowlist.Commits = append(c.Allowlist.Commits,
+		extensionConfig.Allowlist.Commits...)
+	c.Allowlist.Paths = append(c.Allowlist.Paths,
+		extensionConfig.Allowlist.Paths...)
+	c.Allowlist.Regexes = append(c.Allowlist.Regexes,
+		extensionConfig.Allowlist.Regexes...)
+}
+
+----END FILE: config/config.go----
+
+----BEGIN FILE: config/rule.go----
+package config
+
+import (
+	"regexp"
+)
+
+// Rules contain information that define details on how to detect secrets
+type Rule struct {
+	// Description is the description of the rule.
+	Description string
+
+	// RuleID is a unique identifier for this rule
+	RuleID string
+
+	// Entropy is a float representing the minimum shannon
+	// entropy a regex group must have to be considered a secret.
+	Entropy float64
+
+	// SecretGroup is an int used to extract secret from regex
+	// match and used as the group that will have its entropy
+	// checked if `entropy` is set.
+	SecretGroup int
+
+	// Regex is a golang regular expression used to detect secrets.
+	Regex *regexp.Regexp
+
+	// Path is a golang regular expression used to
+	// filter secrets by path
+	Path *regexp.Regexp
+
+	// Tags is an array of strings used for metadata
+	// and reporting purposes.
+	Tags []string
+
+	// Keywords are used for pre-regex check filtering. Rules that contain
+	// keywords will perform a quick string compare check to make sure the
+	// keyword(s) are in the content being scanned.
+	Keywords []string
+
+	// Allowlist allows a rule to be ignored for specific
+	// regexes, paths, and/or commits
+	Allowlist Allowlist
+}
+
+----END FILE: config/rule.go----
+
+----BEGIN FILE: config/utils.go----
+package config
+
+import (
+	"regexp"
+)
+
+func anyRegexMatch(f string, res []*regexp.Regexp) bool {
+	for _, re := range res {
+		if regexMatched(f, re) {
+			return true
+		}
+	}
+	return false
+}
+
+func regexMatched(f string, re *regexp.Regexp) bool {
+	if re == nil {
+		return false
+	}
+	if re.FindString(f) != "" {
+		return true
+	}
+	return false
+}
+
+----END FILE: config/utils.go----
+
+----BEGIN FILE: detect/baseline.go----
+package detect
+
+import (
+	"encoding/json"
+	"fmt"
+	"io"
+	"os"
+
+	"github.com/rs/zerolog/log"
+
+	"github.com/zricethezav/gitleaks/v8/report"
+)
+
+func IsNew(finding report.Finding, baseline []report.Finding) bool {
+	// Explicitly testing each property as it gives significantly better performance in comparison to cmp.Equal(). Drawback is that
+	// the code requires maintanance if/when the Finding struct changes
+	for _, b := range baseline {
+
+		if finding.Author == b.Author &&
+			finding.Commit == b.Commit &&
+			finding.Date == b.Date &&
+			finding.Description == b.Description &&
+			finding.Email == b.Email &&
+			finding.EndColumn == b.EndColumn &&
+			finding.EndLine == b.EndLine &&
+			finding.Entropy == b.Entropy &&
+			finding.File == b.File &&
+			// Omit checking finding.Fingerprint - if the format of the fingerprint changes, the users will see unexpected behaviour
+			finding.Match == b.Match &&
+			finding.Message == b.Message &&
+			finding.RuleID == b.RuleID &&
+			finding.Secret == b.Secret &&
+			finding.StartColumn == b.StartColumn &&
+			finding.StartLine == b.StartLine {
+			return false
+		}
+	}
+	return true
+}
+
+func LoadBaseline(baselinePath string) ([]report.Finding, error) {
+	var previousFindings []report.Finding
+	jsonFile, err := os.Open(baselinePath)
+	if err != nil {
+		return nil, fmt.Errorf("could not open %s", baselinePath)
+	}
+
+	defer func() {
+		if cerr := jsonFile.Close(); cerr != nil {
+			log.Warn().Err(cerr).Msg("problem closing jsonFile handle")
+		}
+	}()
+
+	bytes, err := io.ReadAll(jsonFile)
+	if err != nil {
+		return nil, fmt.Errorf("could not read data from the file %s", baselinePath)
+	}
+
+	err = json.Unmarshal(bytes, &previousFindings)
+	if err != nil {
+		return nil, fmt.Errorf("the format of the file %s is not supported", baselinePath)
+	}
+
+	return previousFindings, nil
+}
+
+----END FILE: detect/baseline.go----
+
+----BEGIN FILE: detect/detect.go----
+package detect
+
+import (
+	"bufio"
+	"context"
+	"fmt"
+	"io"
+	"io/fs"
+	"os"
+	"path/filepath"
+	"regexp"
+	"strings"
+	"sync"
+
+	"github.com/h2non/filetype"
+	"github.com/zricethezav/gitleaks/v8/config"
+	"github.com/zricethezav/gitleaks/v8/detect/git"
+	"github.com/zricethezav/gitleaks/v8/report"
+
+	"github.com/fatih/semgroup"
+	"github.com/gitleaks/go-gitdiff/gitdiff"
+	ahocorasick "github.com/petar-dambovaliev/aho-corasick"
+	"github.com/rs/zerolog/log"
+	"github.com/spf13/viper"
+)
+
+// Type used to differentiate between git scan types:
+// $ gitleaks detect
+// $ gitleaks protect
+// $ gitleaks protect staged
+type GitScanType int
+
+const (
+	DetectType GitScanType = iota
+	ProtectType
+	ProtectStagedType
+
+	gitleaksAllowSignature = "gitleaks:allow"
+)
+
+// Detector is the main detector struct
+type Detector struct {
+	// Config is the configuration for the detector
+	Config config.Config
+
+	// Redact is a flag to redact findings. This is exported
+	// so users using gitleaks as a library can set this flag
+	// without calling `detector.Start(cmd *cobra.Command)`
+	Redact bool
+
+	// verbose is a flag to print findings
+	Verbose bool
+
+	// threads is the number of concurrenct goroutines allowed
+	Threads int
+
+	// files larger than this will be skipped
+	MaxTargetMegaBytes int
+
+	// followSymlinks is a flag to enable scanning symlink files
+	FollowSymlinks bool
+
+	// commitMap is used to keep track of commits that have been scanned.
+	// This is only used for logging purposes and git scans.
+	commitMap map[string]bool
+
+	// findingMutex is to prevent concurrent access to the
+	// findings slice when adding findings.
+	findingMutex *sync.Mutex
+
+	
+----END PART OF FILE: detect/detect.go----

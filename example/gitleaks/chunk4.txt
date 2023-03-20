@@ -1,0 +1,444 @@
+
+----CONTINUED FILE: report/csv.go----
+:= cw.Write([]string{"RuleID",
+		"Commit",
+		"File",
+		"SymlinkFile",
+		"Secret",
+		"Match",
+		"StartLine",
+		"EndLine",
+		"StartColumn",
+		"EndColumn",
+		"Author",
+		"Message",
+		"Date",
+		"Email",
+		"Fingerprint",
+	})
+	if err != nil {
+		return err
+	}
+	for _, f := range f {
+		err = cw.Write([]string{f.RuleID,
+			f.Commit,
+			f.File,
+			f.SymlinkFile,
+			f.Secret,
+			f.Match,
+			strconv.Itoa(f.StartLine),
+			strconv.Itoa(f.EndLine),
+			strconv.Itoa(f.StartColumn),
+			strconv.Itoa(f.EndColumn),
+			f.Author,
+			f.Message,
+			f.Date,
+			f.Email,
+			f.Fingerprint,
+		})
+		if err != nil {
+			return err
+		}
+	}
+
+	cw.Flush()
+	return cw.Error()
+}
+
+----END FILE: report/csv.go----
+
+----BEGIN FILE: report/finding.go----
+package report
+
+import (
+	"strings"
+)
+
+// Finding contains information about strings that
+// have been captured by a tree-sitter query.
+type Finding struct {
+	Description string
+	StartLine   int
+	EndLine     int
+	StartColumn int
+	EndColumn   int
+
+	Line string `json:"-"`
+
+	Match string
+
+	// Secret contains the full content of what is matched in
+	// the tree-sitter query.
+	Secret string
+
+	// File is the name of the file containing the finding
+	File        string
+	SymlinkFile string
+	Commit      string
+
+	// Entropy is the shannon entropy of Value
+	Entropy float32
+
+	Author  string
+	Email   string
+	Date    string
+	Message string
+	Tags    []string
+
+	// Rule is the name of the rule that was matched
+	RuleID string
+
+	// unique identifer
+	Fingerprint string
+}
+
+// Redact removes sensitive information from a finding.
+func (f *Finding) Redact() {
+	f.Line = strings.Replace(f.Line, f.Secret, "REDACTED", -1)
+	f.Match = strings.Replace(f.Match, f.Secret, "REDACTED", -1)
+	f.Secret = "REDACTED"
+}
+
+----END FILE: report/finding.go----
+
+----BEGIN FILE: report/json.go----
+package report
+
+import (
+	"encoding/json"
+	"io"
+)
+
+func writeJson(findings []Finding, w io.WriteCloser) error {
+	if len(findings) == 0 {
+		findings = []Finding{}
+	}
+	encoder := json.NewEncoder(w)
+	encoder.SetIndent("", " ")
+	return encoder.Encode(findings)
+}
+
+----END FILE: report/json.go----
+
+----BEGIN FILE: report/report.go----
+package report
+
+import (
+	"os"
+	"strings"
+
+	"github.com/zricethezav/gitleaks/v8/config"
+)
+
+const (
+	// https://cwe.mitre.org/data/definitions/798.html
+	CWE             = "CWE-798"
+	CWE_DESCRIPTION = "Use of Hard-coded Credentials"
+)
+
+func Write(findings []Finding, cfg config.Config, ext string, reportPath string) error {
+	file, err := os.Create(reportPath)
+	if err != nil {
+		return err
+	}
+	ext = strings.ToLower(ext)
+	switch ext {
+	case ".json", "json":
+		err = writeJson(findings, file)
+	case ".csv", "csv":
+		err = writeCsv(findings, file)
+	case ".sarif", "sarif":
+		err = writeSarif(cfg, findings, file)
+	}
+
+	return err
+}
+
+----END FILE: report/report.go----
+
+----BEGIN FILE: report/sarif.go----
+package report
+
+import (
+	"encoding/json"
+	"fmt"
+	"io"
+
+	"github.com/zricethezav/gitleaks/v8/config"
+)
+
+func writeSarif(cfg config.Config, findings []Finding, w io.WriteCloser) error {
+	sarif := Sarif{
+		Schema:  "https://schemastore.azurewebsites.net/schemas/json/sarif-2.1.0-rtm.5.json",
+		Version: "2.1.0",
+		Runs:    getRuns(cfg, findings),
+	}
+
+	encoder := json.NewEncoder(w)
+	encoder.SetIndent("", " ")
+	return encoder.Encode(sarif)
+}
+
+func getRuns(cfg config.Config, findings []Finding) []Runs {
+	return []Runs{
+		{
+			Tool:    getTool(cfg),
+			Results: getResults(findings),
+		},
+	}
+}
+
+func getTool(cfg config.Config) Tool {
+	tool := Tool{
+		Driver: Driver{
+			Name:            driver,
+			SemanticVersion: version,
+			Rules:           getRules(cfg),
+		},
+	}
+
+	// if this tool has no rules, ensure that it is represented as [] instead of null/nil
+	if hasEmptyRules(tool) {
+		tool.Driver.Rules = make([]Rules, 0)
+	}
+
+	return tool
+}
+
+func hasEmptyRules(tool Tool) bool {
+	return len(tool.Driver.Rules) == 0
+}
+
+func getRules(cfg config.Config) []Rules {
+	// TODO	for _, rule := range cfg.Rules {
+	var rules []Rules
+	for _, rule := range cfg.OrderedRules() {
+		shortDescription := ShortDescription{
+			Text: rule.Description,
+		}
+		if rule.Regex != nil {
+			shortDescription = ShortDescription{
+				Text: rule.Regex.String(),
+			}
+		} else if rule.Path != nil {
+			shortDescription = ShortDescription{
+				Text: rule.Path.String(),
+			}
+		}
+		rules = append(rules, Rules{
+			ID:          rule.RuleID,
+			Name:        rule.Description,
+			Description: shortDescription,
+		})
+	}
+	return rules
+}
+
+func messageText(f Finding) string {
+	if f.Commit == "" {
+		return fmt.Sprintf("%s has detected secret for file %s.", f.RuleID, f.File)
+	}
+
+	return fmt.Sprintf("%s has detected secret for file %s at commit %s.", f.RuleID, f.File, f.Commit)
+
+}
+
+func getResults(findings []Finding) []Results {
+	results := []Results{}
+	for _, f := range findings {
+		r := Results{
+			Message: Message{
+				Text: messageText(f),
+			},
+			RuleId:    f.RuleID,
+			Locations: getLocation(f),
+			// This information goes in partial fingerprings until revision
+			// data can be added somewhere else
+			PartialFingerPrints: PartialFingerPrints{
+				CommitSha:     f.Commit,
+				Email:         f.Email,
+				CommitMessage: f.Message,
+				Date:          f.Date,
+				Author:        f.Author,
+			},
+		}
+		results = append(results, r)
+	}
+	return results
+}
+
+func getLocation(f Finding) []Locations {
+	uri := f.File
+	if f.SymlinkFile != "" {
+		uri = f.SymlinkFile
+	}
+	return []Locations{
+		{
+			PhysicalLocation: PhysicalLocation{
+				ArtifactLocation: ArtifactLocation{
+					URI: uri,
+				},
+				Region: Region{
+					StartLine:   f.StartLine,
+					EndLine:     f.EndLine,
+					StartColumn: f.StartColumn,
+					EndColumn:   f.EndColumn,
+					Snippet: Snippet{
+						Text: f.Secret,
+					},
+				},
+			},
+		},
+	}
+}
+
+type PartialFingerPrints struct {
+	CommitSha     string `json:"commitSha"`
+	Email         string `json:"email"`
+	Author        string `json:"author"`
+	Date          string `json:"date"`
+	CommitMessage string `json:"commitMessage"`
+}
+
+type Sarif struct {
+	Schema  string `json:"$schema"`
+	Version string `json:"version"`
+	Runs    []Runs `json:"runs"`
+}
+
+type ShortDescription struct {
+	Text string `json:"text"`
+}
+
+type FullDescription struct {
+	Text string `json:"text"`
+}
+
+type Rules struct {
+	ID          string           `json:"id"`
+	Name        string           `json:"name"`
+	Description ShortDescription `json:"shortDescription"`
+}
+
+type Driver struct {
+	Name            string  `json:"name"`
+	SemanticVersion string  `json:"semanticVersion"`
+	Rules           []Rules `json:"rules"`
+}
+
+type Tool struct {
+	Driver Driver `json:"driver"`
+}
+
+type Message struct {
+	Text string `json:"text"`
+}
+
+type ArtifactLocation struct {
+	URI string `json:"uri"`
+}
+
+type Region struct {
+	StartLine   int     `json:"startLine"`
+	StartColumn int     `json:"startColumn"`
+	EndLine     int     `json:"endLine"`
+	EndColumn   int     `json:"endColumn"`
+	Snippet     Snippet `json:"snippet"`
+}
+
+type Snippet struct {
+	Text string `json:"text"`
+}
+
+type PhysicalLocation struct {
+	ArtifactLocation ArtifactLocation `json:"artifactLocation"`
+	Region           Region           `json:"region"`
+}
+
+type Locations struct {
+	PhysicalLocation PhysicalLocation `json:"physicalLocation"`
+}
+
+type Results struct {
+	Message             Message     `json:"message"`
+	RuleId              string      `json:"ruleId"`
+	Locations           []Locations `json:"locations"`
+	PartialFingerPrints `json:"partialFingerprints"`
+}
+
+type Runs struct {
+	Tool    Tool      `json:"tool"`
+	Results []Results `json:"results"`
+}
+
+----END FILE: report/sarif.go----
+
+----BEGIN FILE: testdata/repos/nogit/main.go----
+package main
+
+import "fmt"
+
+func main() {
+
+	var a = "initial"
+	fmt.Println(a)
+
+	var b, c int = 1, 2
+	fmt.Println(b, c)
+
+	var d = true
+	fmt.Println(d)
+
+	var e int
+	fmt.Println(e)
+
+	// opps I added a secret at line 20
+	awsToken := "AKIALALEMEL33243OLIA"
+
+	f := "apple"
+	fmt.Println(f)
+}
+
+----END FILE: testdata/repos/nogit/main.go----
+
+----BEGIN FILE: testdata/repos/small/api/api.go----
+package api
+
+import "fmt"
+
+func PrintHello() {
+	fmt.Println("hello")
+}
+
+----END FILE: testdata/repos/small/api/api.go----
+
+----BEGIN FILE: testdata/repos/small/main.go----
+package main
+
+import (
+	"fmt"
+	"os"
+)
+
+func main() {
+
+	var a = "initial"
+	fmt.Println(a)
+
+	var b, c int = 1, 2
+	fmt.Println(b, c)
+
+	var d = true
+	fmt.Println(d)
+
+	var e int
+	fmt.Println(e)
+
+	// load secret via env
+	awsToken := os.Getenv("AWS_TOKEN")
+
+	f := "apple"
+	fmt.Println(f)
+}
+
+----END FILE: testdata/repos/small/main.go----
