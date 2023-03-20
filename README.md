@@ -1,6 +1,13 @@
 # go2chatgpt
 A small program that chunks up program files to be loaded into chatgpt. 1/2 written by chatgpt. Inspired by https://github.com/mpoon/gpt-repository-loader
 
+## Install
+```
+git clone https://github.com/zricethezav/go2chatgpt.git
+cd go2chatgpt
+go build (install go dependencies)
+```
+
 ## Usage
 ```
 Usage: go2chatgpt [options] <source> <output_folder>
@@ -11,5 +18,8 @@ Usage: go2chatgpt [options] <source> <output_folder>
   -include string
         Comma-separated list of glob patterns to include
 ```
+
+## Examples
+See `/example`
 
 
