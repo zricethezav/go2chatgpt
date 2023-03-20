@@ -1,3 +1,50 @@
+
+----BEGIN FILE: .gitignore----
+go2chatgpt
+.DS_STORE
+
+----END FILE: .gitignore----
+
+----BEGIN FILE: README.md----
+# go2chatgpt
+A small program that chunks up program files to be loaded into chatgpt. 1/2 written by chatgpt. Inspired by https://github.com/mpoon/gpt-repository-loader
+
+## Usage
+```
+Usage: go2chatgpt [options] <source> <output_folder>
+  -chunksize int
+        Chunk size in KB (GPT-4 max is 16KB) (default 13)
+  -exclude string
+        Comma-separated list of glob patterns to exclude
+  -include string
+        Comma-separated list of glob patterns to include
+```
+
+
+
+----END FILE: README.md----
+
+----BEGIN FILE: go.mod----
+module github/zricethezav/go2chatgpt
+
+go 1.20
+
+require (
+	github.com/bmatcuk/doublestar/v4 v4.6.0
+	golang.org/x/tools v0.7.0
+)
+
+----END FILE: go.mod----
+
+----BEGIN FILE: go.sum----
+github.com/bmatcuk/doublestar/v4 v4.6.0 h1:HTuxyug8GyFbRkrffIpzNCSK4luc0TY3wzXvzIZhEXc=
+github.com/bmatcuk/doublestar/v4 v4.6.0/go.mod h1:xBQ8jztBU6kakFMg+8WGxn0c6z1fTSPVIjEY1Wr7jzc=
+golang.org/x/tools v0.7.0 h1:W4OVu8VVOaIO0yzWMNdepAulS7YfoS3Zabrm8DOXXU4=
+golang.org/x/tools v0.7.0/go.mod h1:4pg6aUX35JBAogB10C9AtvVL+qowtN4pT3CGSQex14s=
+
+----END FILE: go.sum----
+
+----BEGIN FILE: main.go----
 package main
 
 import (
@@ -210,3 +257,5 @@ func doChunk(opts options, filePath string) error {
 
 	return nil
 }
+
+----END FILE: main.go----
